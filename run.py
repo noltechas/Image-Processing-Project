@@ -1,6 +1,6 @@
 from utils.image_processing import load_image, preprocess_image, apply_adaptive_thresholding, apply_otsu_thresholding, apply_color_clustering
 from utils.visualization import display_images
-from models.model import generate_vector_maps
+from model import generate_vector_maps
 
 
 def main():
