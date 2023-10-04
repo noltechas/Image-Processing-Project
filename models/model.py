@@ -1,40 +1,67 @@
-import tensorflow as tf
-from keras.models import Model
-from keras.layers import Input, Conv2D, MaxPooling2D, Flatten, Dense, concatenate
+import cv2
+import numpy as np
+from sklearn.model_selection import train_test_split
+from keras.models import Sequential
+from keras.layers import Conv2D, MaxPooling2D, Flatten, Dense
+from utils.data_preprocessing import load_keypoints_from_csv
 
-# Sample model with multiple inputs
-def create_model(input_shape=(368, 432, 3)):
-    # Original image input
-    input_original = Input(shape=input_shape, name="input_original")
-    x1 = Conv2D(32, (3, 3), activation='relu')(input_original)
-    x1 = MaxPooling2D((2, 2))(x1)
+# Load keypoints
+csv_path = '../data/mappings/breaststroke.csv'
+keypoints_data = load_keypoints_from_csv(csv_path)
 
-    # Thresholded image input
-    input_thresholded = Input(shape=input_shape, name="input_thresholded")
-    x2 = Conv2D(32, (3, 3), activation='relu')(input_thresholded)
-    x2 = MaxPooling2D((2, 2))(x2)
+# Load images and prepare data
+images = []
+keypoints = []
 
-    # Clustered image input
-    input_clustered = Input(shape=input_shape, name="input_clustered")
-    x3 = Conv2D(32, (3, 3), activation='relu')(input_clustered)
-    x3 = MaxPooling2D((2, 2))(x3)
+# Determine the expected number of keypoints
+expected_keypoints = max(len(data['x']) for data in keypoints_data.values())
 
-    # Merge the outputs
-    merged = concatenate([x1, x2, x3])
+images_with_keypoints = []
 
-    # Further processing
-    x = Flatten()(merged)
-    x = Dense(512, activation='relu')(x)
-    outputs = Dense(NUM_KEYPOINTS * 2, activation='linear')(x)  # x and y for each keypoint
+for filename, data in keypoints_data.items():
+    # Load original, thresholded, and clustered images
+    img_original = cv2.imread(f"../data/original_frames/{filename}")
+    img_thresholded = cv2.imread(f"../data/thresholded_frames/{filename}")
+    img_clustered = cv2.imread(f"../data/clustered_frames/{filename}")
 
-    model = Model(inputs=[input_original, input_thresholded, input_clustered], outputs=outputs)
-    return model
+    # Normalize and concatenate images along the channel dimension
+    img_combined = np.concatenate([
+        img_original / 255.0,
+        img_thresholded / 255.0,
+        img_clustered / 255.0
+    ], axis=-1)
 
-# Compile the model
-model = create_model()
-model.compile(optimizer='adam', loss='mean_squared_error')
+    images.append(img_combined)
 
-# Train the model
-# Assuming X_train_original, X_train_thresholded, and X_train_clustered are your training data arrays
-# and y_train is the ground truth keypoints
-model.fit([X_train_original, X_train_thresholded, X_train_clustered], y_train, batch_size=32, epochs=100, validation_split=0.1)
+    # Serialize keypoints in a consistent order for each image
+    kp_x = np.array(data['x']) / 480
+    kp_y = np.array(data['y']) / 640
+
+    # Fill in missing keypoints with default value
+    while len(kp_x) < expected_keypoints:
+        kp_x = np.append(kp_x, -1)
+        kp_y = np.append(kp_y, -1)
+
+    serialized_keypoints = np.hstack((kp_x, kp_y))  # Serialize as [x1, x2, ..., xn, y1, y2, ..., yn]
+    images_with_keypoints.append((img_combined, serialized_keypoints))
+
+# Separate images and keypoints
+X = np.array([item[0] for item in images_with_keypoints])
+y = np.array([item[1] for item in images_with_keypoints])
+
+# Split data
+X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2)
+
+# Define model
+model = Sequential([
+    Conv2D(32, (3, 3), activation='relu', input_shape=(640, 480, 9)),
+    MaxPooling2D(2, 2),
+    Conv2D(64, (3, 3), activation='relu'),
+    MaxPooling2D(2, 2),
+    Flatten(),
+    Dense(128, activation='relu'),
+    Dense(y_train.shape[1])
+])
+
+model.compile(optimizer='adam', loss='mse')
+model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=10)
