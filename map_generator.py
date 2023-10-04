@@ -1,76 +1,91 @@
+import os
+import pandas as pd
 import numpy as np
-import cv2, csv
+import cv2
+import json
 
-def generate_heatmap(height, width, keypoints, sigma=2):
-    heatmap = np.zeros((height, width, len(keypoints)), dtype=np.float32)
-    
-    for i, (x, y) in enumerate(keypoints):
-        heatmap[:, :, i] = cv2.GaussianBlur((heatmap[:, :, i] + draw_gaussian(heatmap[:, :, i], (x, y), sigma)), (0, 0), sigma)
-    
-    return heatmap
+def load_keypoints_from_csv(csv_path):
+    df = pd.read_csv(csv_path)
+    keypoints_data = {}
+    for _, row in df.iterrows():
+        filename = row['filename']
+        
+        # Extracting cx and cy from the string
+        point_data_str = row['region_shape_attributes']
+        point_data = json.loads(point_data_str.replace('""', '"').replace('undefined', '"undefined"'))
+        
+        # Check if 'cx' and 'cy' keys are present in point_data
+        if 'cx' not in point_data or 'cy' not in point_data:
+            continue
+        
+        x = point_data['cx']
+        y = point_data['cy']
+        
+        joint_str = row['region_attributes'].replace('undefined', 'Lhand')  # Handle 'undefined' joint names
+        
+        # Check if joint_str is a valid JSON string
+        try:
+            joint_data = json.loads(joint_str.replace('""', '"'))
+        except json.JSONDecodeError:
+            continue
+        
+        joint_name = joint_data.get('joint', 'Unknown')
+        
+        if filename not in keypoints_data:
+            keypoints_data[filename] = {'x': [], 'y': [], 'joint': []}
+        keypoints_data[filename]['x'].append(x)
+        keypoints_data[filename]['y'].append(y)
+        keypoints_data[filename]['joint'].append(joint_name)
+    return keypoints_data
 
-def draw_gaussian(heatmap, center, sigma):
-    tmp_size = sigma * 3
-    ul = [int(center[0] - tmp_size), int(center[1] - tmp_size)]
-    br = [int(center[0] + tmp_size + 1), int(center[1] + tmp_size + 1)]
-    if ul[0] >= heatmap.shape[1] or ul[1] >= heatmap.shape[0] or br[0] < 0 or br[1] < 0:
-        return heatmap
+def generate_heatmap(image_shape, keypoints, sigma=3):
+    heatmap = np.zeros(image_shape[:2], dtype=np.float32)
+    for x, y in zip(keypoints['x'], keypoints['y']):
+        heatmap = cv2.circle(heatmap, (x, y), sigma, (1,), -1)
+    return heatmap / np.max(heatmap)  # Normalize to [0, 1]
 
-    size = 2 * tmp_size + 1
-    x = np.arange(0, size, 1, np.float32)
-    y = x[:, np.newaxis]
-    x0 = y0 = size // 2
-    g = np.exp(- ((x - x0) ** 2 + (y - y0) ** 2) / (2 * sigma ** 2))
-    
-    g_x = max(0, -ul[0]), min(br[0], heatmap.shape[1]) - ul[0]
-    g_y = max(0, -ul[1]), min(br[1], heatmap.shape[0]) - ul[1]
-    img_x = max(0, ul[0]), min(br[0], heatmap.shape[1])
-    img_y = max(0, ul[1]), min(br[1], heatmap.shape[0])
-
-    heatmap[img_y[0]:img_y[1], img_x[0]:img_x[1]] = g[g_y[0]:g_y[1], g_x[0]:g_x[1]]
-    return heatmap
-
-def generate_vectormap(height, width, keypoints_pairs):
-    vectormap = np.zeros((height, width, len(keypoints_pairs)*2), dtype=np.float32)
-    
-    for i, (kp1, kp2) in enumerate(keypoints_pairs):
-        vectormap[:, :, i*2:i*2+2] = draw_vector(vectormap[:, :, i*2:i*2+2], kp1, kp2)
-    
+def generate_vectormap(image_shape, keypoints):
+    vectormap = np.zeros((*image_shape[:2], 2), dtype=np.float32)
+    # Assuming you have a list of connected joints, for example:
+    connections = [('Lshoulder', 'Lelbow'), ('Rshoulder', 'Relbow')]  # Add more connections as needed
+    for start, end in connections:
+        start_idx = keypoints['joint'].index(start)
+        end_idx = keypoints['joint'].index(end)
+        start_point = (keypoints['x'][start_idx], keypoints['y'][start_idx])
+        end_point = (keypoints['x'][end_idx], keypoints['y'][end_idx])
+        direction = np.array(end_point) - np.array(start_point)
+        unit_vector = direction / np.linalg.norm(direction)
+        # Fill the vectormap in the vicinity of the line connecting the two keypoints
+        # This is a simplified version; you might want to refine it further
+        cv2.line(vectormap[..., 0], start_point, end_point, unit_vector[0], 1)
+        cv2.line(vectormap[..., 1], start_point, end_point, unit_vector[1], 1)
     return vectormap
 
-def draw_vector(vectormap, kp1, kp2, thickness=1):
-    # Calculate unit vector between kp1 and kp2
-    length = np.linalg.norm(np.array(kp2) - np.array(kp1))
-    if length == 0:
-        return vectormap
-    dx = (kp2[0] - kp1[0]) / length
-    dy = (kp2[1] - kp1[1]) / length
+def save_maps(filename, heatmap, vectormap, heatmap_dir, vectormap_dir):
+    # Strip the image extension and append .npy
+    base_filename = os.path.splitext(filename)[0] + '.npy'
+    heatmap_path = os.path.join(heatmap_dir, base_filename)
+    vectormap_path = os.path.join(vectormap_dir, base_filename)
+    np.save(heatmap_path, heatmap)
+    np.save(vectormap_path, vectormap)
 
-    # Draw line on the vectormap
-    cv2.line(vectormap[:,:,0], tuple(kp1), tuple(kp2), dx, thickness)
-    cv2.line(vectormap[:,:,1], tuple(kp1), tuple(kp2), dy, thickness)
+def main():
+    csv_path = 'data/mappings/breaststroke.csv'
+    keypoints_data = load_keypoints_from_csv(csv_path)
     
-    return vectormap
+    for filename, keypoints in keypoints_data.items():
+        image_path = os.path.join('data/original_frames', filename).replace('\\', '/')
+        print(f"Loading image from: {image_path}")  # Add this line
+        image = cv2.imread(image_path)
+        
+        # Check if the image was loaded successfully
+        if image is None:
+            print(f"Failed to load image: {image_path}")
+            continue
+        
+        heatmap = generate_heatmap(image.shape, keypoints)
+        vectormap = generate_vectormap(image.shape, keypoints)
+        save_maps(filename, heatmap, vectormap, 'data/mappings/heatmaps', 'data/mappings/vectormaps')
 
-# 1. Extract Keypoints
-def extract_keypoints_from_csv(csv_path):
-    keypoints = []
-    with open(csv_path, 'r') as file:
-        reader = csv.reader(file)
-        for row in reader:
-            cx = int(row[5].split('"cx":')[1].split(',')[0])
-            cy = int(row[5].split('"cy":')[1].split('}')[0])
-            keypoints.append((cx, cy))
-    return keypoints
-
-csv_path = 'path_to_your_csv_file.csv'
-keypoints_data = extract_keypoints_from_csv(csv_path)
-
-# 2. Generate Heatmaps and Vectormaps
-height, width = 640, 480  # Adjust based on your image size
-heatmap = generate_heatmap(height, width, keypoints_data)
-
-# For vectormaps, you'll need to define pairs of keypoints that are connected.
-# Here's an example assuming keypoints are in the order: [Rhand, Lelbow, Lshoulder, ...]
-keypoints_pairs = [(keypoints_data[0], keypoints_data[1]), (keypoints_data[1], keypoints_data[2]), ...]  # Define more pairs as needed
-vectormap = generate_vectormap(height, width, keypoints_pairs)
+if __name__ == "__main__":
+    main()
