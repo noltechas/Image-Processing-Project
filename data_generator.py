@@ -58,7 +58,11 @@ class DataGenerator(tf.keras.utils.Sequence):
                 if j == joint:
                     temp_heatmap = cv2.circle(temp_heatmap, (x, y), sigma, (1,), -1)
             heatmap[:, :, idx] = temp_heatmap
-            heatmap[:, :, idx] /= np.max(heatmap[:, :, idx])  # Normalize to [0, 1]
+
+            # Check if the maximum value is not zero before normalizing
+            max_val = np.max(heatmap[:, :, idx])
+            if max_val > 0:
+                heatmap[:, :, idx] /= max_val  # Normalize to [0, 1]
         return heatmap
 
 
@@ -122,12 +126,16 @@ class DataGenerator(tf.keras.utils.Sequence):
         for filename in batch_filenames:
             image_path = os.path.join(self.image_dir, filename)
             image = cv2.imread(image_path)
+
+            # Scale down the image to half its original size
+            image = cv2.resize(image, (image.shape[1] // 2, image.shape[0] // 2))
+
             keypoints = self.keypoints_data[filename]
             heatmap = self.generate_heatmap(image.shape, keypoints)
             vectormap = self.generate_vectormap(image.shape, keypoints)
 
             # Resize the image, heatmap, and vectormap to a consistent size if necessary
-            target_shape = (640, 480)  # Adjust this to your desired shape
+            target_shape = (320, 240)  # Adjust this to half of your previous desired shape
             image = cv2.resize(image, target_shape)
             heatmap = cv2.resize(heatmap, target_shape)
             vectormap = cv2.resize(vectormap, target_shape)
